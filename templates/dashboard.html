@@ -47,6 +47,27 @@
             font-size: 2.5rem;
         }
         
+        .message-container {
+            margin-bottom: 30px;
+        }
+        
+        .message {
+            background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+            color: #1565c0;
+            border: 1px solid #90caf9;
+            border-radius: 10px;
+            padding: 15px 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 500;
+            box-shadow: 0 5px 15px rgba(21, 101, 192, 0.1);
+        }
+        
+        .message i {
+            font-size: 1.2rem;
+        }
+        
         .stats-container {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -75,6 +96,7 @@
         .stat-card.packed .icon { color: #28a745; }
         .stat-card.pending .icon { color: #ffc107; }
         .stat-card.cancelled .icon { color: #dc3545; }
+        .stat-card.total .icon { color: #6c757d; }
         
         .stat-card .number {
             font-size: 2rem;
@@ -85,6 +107,7 @@
         .stat-card.packed .number { color: #28a745; }
         .stat-card.pending .number { color: #ffc107; }
         .stat-card.cancelled .number { color: #dc3545; }
+        .stat-card.total .number { color: #6c757d; }
         
         .stat-card .label {
             color: #666;
@@ -141,6 +164,33 @@
         
         .stop-btn:hover {
             box-shadow: 0 8px 25px rgba(220, 53, 69, 0.4);
+        }
+        
+        .upload-section {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        .upload-btn {
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 50px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 5px 15px rgba(40, 167, 69, 0.3);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .upload-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(40, 167, 69, 0.4);
         }
         
         .filter-section {
@@ -399,6 +449,15 @@
         </h1>
     </div>
     
+    {% if message %}
+    <div class="message-container">
+        <div class="message">
+            <i class="fas fa-info-circle"></i>
+            {{ message }}
+        </div>
+    </div>
+    {% endif %}
+    
     <div class="stats-container">
         <div class="stat-card packed">
             <div class="icon">
@@ -421,6 +480,13 @@
             <div class="number">{{ cancelled }}</div>
             <div class="label">Cancelled Orders</div>
         </div>
+        <div class="stat-card total">
+            <div class="icon">
+                <i class="fas fa-list"></i>
+            </div>
+            <div class="number">{{ packed + pending + cancelled }}</div>
+            <div class="label">Total Orders</div>
+        </div>
     </div>
     
     <div class="controls-container">
@@ -430,6 +496,15 @@
                     <i class="fas fa-camera"></i>
                     <span id="scan-text">Start Barcode Scanner</span>
                 </button>
+            </div>
+            <div class="upload-section">
+                <form id="upload-form" action="/upload" method="post" enctype="multipart/form-data" style="display: inline-block;">
+                    <input type="file" id="file-input" name="file" accept=".pdf,.csv" style="display: none;" onchange="handleFileSelect()">
+                    <button type="button" class="upload-btn" onclick="document.getElementById('file-input').click()">
+                        <i class="fas fa-upload"></i>
+                        Upload New File
+                    </button>
+                </form>
             </div>
             <div class="filter-section">
                 <label for="status-filter">Filter by Status:</label>
@@ -512,7 +587,7 @@
         $(document).ready(function () {
             dataTable = $('#orders').DataTable({
                 responsive: true,
-                pageLength: 25,
+                paging: false, // Disable pagination to show all entries
                 order: [[6, 'desc']], // Sort by Scanned Time descending
                 columnDefs: [
                     { targets: [7], orderable: false } // Disable sorting for Action column
@@ -869,6 +944,37 @@
             const counter = document.getElementById('scan-counter');
             if (counter) {
                 counter.textContent = `Scanned this session: ${scanCount}`;
+            }
+        }
+
+        function handleFileSelect() {
+            const fileInput = document.getElementById('file-input');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                return;
+            }
+            
+            // Check file type
+            const fileName = file.name.toLowerCase();
+            if (!fileName.endsWith('.pdf') && !fileName.endsWith('.csv')) {
+                showToast('Please select a PDF or CSV file', 'error');
+                fileInput.value = '';
+                return;
+            }
+            
+            // Show confirmation dialog
+            const confirmed = confirm(`Are you sure you want to upload "${file.name}"?\n\nThis will replace the current data and all existing orders will be lost.`);
+            
+            if (confirmed) {
+                // Show loading message
+                showToast('Uploading file, please wait...', 'info');
+                
+                // Submit the form
+                document.getElementById('upload-form').submit();
+            } else {
+                // Clear the file input if user cancels
+                fileInput.value = '';
             }
         }
 

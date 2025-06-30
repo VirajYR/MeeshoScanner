@@ -63,18 +63,45 @@ def index():
 def upload():
     try:
         if 'file' not in request.files:
-            return render_template('index.html', message="No file selected. Please choose a file to upload.")
+            # Check if this is a dashboard upload
+            if os.path.exists(DATA_FILE):
+                df = pd.read_csv(DATA_FILE)
+                return render_template('dashboard.html', 
+                                       packed=len(df[df['Status'] == 'Packed']),
+                                       pending=len(df[df['Status'] == 'Pending']),
+                                       cancelled=len(df[df['Status'] == 'Cancelled']),
+                                       table=df.to_dict(orient='records'),
+                                       message="No file selected. Please choose a file to upload.")
+            else:
+                return render_template('index.html', message="No file selected. Please choose a file to upload.")
         
         file = request.files['file']
         if file.filename == '':
-            return render_template('index.html', message="No file selected. Please choose a file to upload.")
+            # Check if this is a dashboard upload
+            if os.path.exists(DATA_FILE):
+                df = pd.read_csv(DATA_FILE)
+                return render_template('dashboard.html', 
+                                       packed=len(df[df['Status'] == 'Packed']),
+                                       pending=len(df[df['Status'] == 'Pending']),
+                                       cancelled=len(df[df['Status'] == 'Cancelled']),
+                                       table=df.to_dict(orient='records'),
+                                       message="No file selected. Please choose a file to upload.")
+            else:
+                return render_template('index.html', message="No file selected. Please choose a file to upload.")
 
         filename = file.filename.lower()
         logger.info(f"Processing file: {filename}")
         
-        # Remove existing data file
+        # Check if we're replacing existing data
+        is_replacement = os.path.exists(DATA_FILE)
+        
+        # Remove existing data file to prevent conflicts
         if os.path.exists(DATA_FILE):
-            os.remove(DATA_FILE)
+            try:
+                os.remove(DATA_FILE)
+                logger.info("Previous data file removed successfully")
+            except Exception as e:
+                logger.error(f"Error removing previous data file: {str(e)}")
 
         try:
             if filename.endswith('.pdf'):
@@ -92,10 +119,23 @@ def upload():
                         df[col] = 'Unknown'
                 logger.info(f"Loaded {len(df)} orders from CSV")
             else:
-                return render_template('index.html', message="Unsupported file format. Please upload a PDF or CSV file.")
+                error_msg = "Unsupported file format. Please upload a PDF or CSV file."
+                if is_replacement:
+                    df = pd.DataFrame()  # Empty dataframe for dashboard
+                    return render_template('dashboard.html', 
+                                           packed=0, pending=0, cancelled=0,
+                                           table=[], message=error_msg)
+                else:
+                    return render_template('index.html', message=error_msg)
 
             if df.empty:
-                return render_template('index.html', message="No valid data found in the uploaded file. Please check the file format and content.")
+                error_msg = "No valid data found in the uploaded file. Please check the file format and content."
+                if is_replacement:
+                    return render_template('dashboard.html', 
+                                           packed=0, pending=0, cancelled=0,
+                                           table=[], message=error_msg)
+                else:
+                    return render_template('index.html', message=error_msg)
 
             # Initialize status columns
             df['Status'] = 'Pending'
@@ -113,18 +153,48 @@ def upload():
             df = df[df['AWB ID'] != '']  # Remove empty AWB IDs
             
             if df.empty:
-                return render_template('index.html', message="No valid AWB IDs found in the uploaded file.")
+                error_msg = "No valid AWB IDs found in the uploaded file."
+                if is_replacement:
+                    return render_template('dashboard.html', 
+                                           packed=0, pending=0, cancelled=0,
+                                           table=[], message=error_msg)
+                else:
+                    return render_template('index.html', message=error_msg)
             
             df.to_csv(DATA_FILE, index=False)
             logger.info(f"Successfully saved {len(df)} orders to {DATA_FILE}")
             
+            # Prepare success message
+            action_word = "replaced" if is_replacement else "uploaded"
+            success_msg = f"Successfully {action_word} {filename} with {len(df)} orders!"
+            
         except Exception as e:
             logger.error(f"Error processing file: {str(e)}")
-            return render_template('index.html', message=f"Error processing file: {str(e)}. Please ensure the file is not corrupted and contains valid data.")
+            error_msg = f"Error processing file: {str(e)}. Please ensure the file is not corrupted and contains valid data."
+            if is_replacement:
+                return render_template('dashboard.html', 
+                                       packed=0, pending=0, cancelled=0,
+                                       table=[], message=error_msg)
+            else:
+                return render_template('index.html', message=error_msg)
 
     except Exception as e:
         logger.error(f"Upload failed: {str(e)}")
-        return render_template('index.html', message=f"Upload failed: {str(e)}")
+        error_msg = f"Upload failed: {str(e)}"
+        # Try to determine if we should show dashboard or index
+        if os.path.exists(DATA_FILE):
+            try:
+                df = pd.read_csv(DATA_FILE)
+                return render_template('dashboard.html', 
+                                       packed=len(df[df['Status'] == 'Packed']),
+                                       pending=len(df[df['Status'] == 'Pending']),
+                                       cancelled=len(df[df['Status'] == 'Cancelled']),
+                                       table=df.to_dict(orient='records'),
+                                       message=error_msg)
+            except:
+                return render_template('index.html', message=error_msg)
+        else:
+            return render_template('index.html', message=error_msg)
 
     return redirect(url_for('index'))
 
