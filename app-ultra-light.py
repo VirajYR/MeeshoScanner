@@ -3,9 +3,11 @@ import os
 import csv
 import json
 from datetime import datetime
+import pdfplumber  # Lighter alternative to PyMuPDF
 from flask_cors import CORS
 import re
 import logging
+import tempfile
 
 app = Flask(__name__)
 CORS(app)
@@ -50,50 +52,10 @@ def get_order_stats(orders):
         'delivered': delivered
     }
 
-def create_sample_data():
-    """Create sample order data for testing"""
-    sample_orders = [
-        {
-            'Order ID': 'MSO001',
-            'Product': 'Samsung Galaxy Case',
-            'Quantity': '1',
-            'Customer': 'John Doe',
-            'Address': '123 Main St, Mumbai',
-            'Status': 'Packed',
-            'Tracking Number': 'TRK001'
-        },
-        {
-            'Order ID': 'MSO002',
-            'Product': 'iPhone Charger',
-            'Quantity': '2',
-            'Customer': 'Jane Smith',
-            'Address': '456 Park Ave, Delhi',
-            'Status': 'Packed',
-            'Tracking Number': 'TRK002'
-        },
-        {
-            'Order ID': 'MSO003',
-            'Product': 'Bluetooth Headphones',
-            'Quantity': '1',
-            'Customer': 'Mike Johnson',
-            'Address': '789 Oak St, Bangalore',
-            'Status': 'In Transit',
-            'Tracking Number': 'TRK003'
-        }
-    ]
-    
-    fieldnames = ['Order ID', 'Product', 'Quantity', 'Customer', 'Address', 'Status', 'Tracking Number']
-    write_csv_from_dict(DATA_FILE, sample_orders, fieldnames)
-    return sample_orders
-
 @app.route('/')
 def index():
     if not os.path.exists(DATA_FILE):
-        # Create sample data for demo purposes
-        create_sample_data()
-        return render_template('index.html', 
-                             message="Demo data loaded! Upload your CSV file to replace it.",
-                             total_orders=3)
+        return render_template('index.html', message="Please upload your manifest PDF file.")
     
     orders = read_csv_as_dict(DATA_FILE)
     packed_orders = [o for o in orders if o.get('Status') == 'Packed']
@@ -112,12 +74,15 @@ def upload_file():
         if file.filename == '':
             return jsonify({'error': 'No selected file'}), 400
         
-        if file and file.filename.endswith('.csv'):
+        if file and (file.filename.endswith('.pdf') or file.filename.endswith('.csv')):
             # Save uploaded file temporarily
             temp_path = os.path.join(UPLOAD_FOLDER, 'temp_' + file.filename)
             file.save(temp_path)
             
-            orders = read_csv_as_dict(temp_path)
+            if file.filename.endswith('.pdf'):
+                orders = extract_orders_from_pdf(temp_path)
+            else:
+                orders = read_csv_as_dict(temp_path)
             
             # Clean up temp file
             if os.path.exists(temp_path):
@@ -138,11 +103,73 @@ def upload_file():
             else:
                 return jsonify({'error': 'No orders found in the file'}), 400
         else:
-            return jsonify({'error': 'Invalid file type. Please upload CSV files only. PDF support temporarily disabled for deployment.'}), 400
+            return jsonify({'error': 'Invalid file type. Please upload PDF or CSV files only.'}), 400
     
     except Exception as e:
         logger.error(f"Upload error: {str(e)}")
         return jsonify({'error': f'Upload failed: {str(e)}'}), 500
+
+def extract_orders_from_pdf(pdf_path):
+    """Extract order information from PDF using pdfplumber"""
+    orders = []
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            all_text = ""
+            for page in pdf.pages:
+                all_text += page.extract_text() or ""
+        
+        # Simple regex patterns for extracting order information
+        order_patterns = [
+            r'Order[:\s]*([A-Z0-9-]+)',
+            r'AWB[:\s]*([A-Z0-9-]+)',
+            r'Tracking[:\s]*([A-Z0-9-]+)'
+        ]
+        
+        lines = all_text.split('\n')
+        current_order = {}
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Look for order IDs
+            for pattern in order_patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    if current_order:
+                        orders.append(current_order)
+                    current_order = {
+                        'Order ID': match.group(1),
+                        'Product': '',
+                        'Quantity': '1',
+                        'Customer': '',
+                        'Address': '',
+                        'Status': 'Packed',
+                        'Tracking Number': match.group(1)
+                    }
+                    break
+            
+            # Extract product information (simple heuristics)
+            if current_order and ('product' in line.lower() or 'item' in line.lower()):
+                current_order['Product'] = line[:50]  # Limit length
+            
+            # Extract customer information
+            if current_order and any(word in line.lower() for word in ['customer', 'name', 'buyer']):
+                current_order['Customer'] = line[:50]
+            
+            # Extract address information
+            if current_order and any(word in line.lower() for word in ['address', 'delivery', 'ship']):
+                current_order['Address'] = line[:100]
+        
+        # Add the last order
+        if current_order:
+            orders.append(current_order)
+    
+    except Exception as e:
+        logger.error(f"PDF extraction error: {str(e)}")
+    
+    return orders
 
 @app.route('/dashboard')
 def dashboard():
