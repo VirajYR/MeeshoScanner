@@ -1,0 +1,275 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meesho Order Scanner - Upload Manifest</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            text-align: center;
+        }
+        
+        .logo {
+            font-size: 3rem;
+            color: #667eea;
+            margin-bottom: 20px;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2rem;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1rem;
+        }
+        
+        .message {
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin-bottom: 30px;
+            border-radius: 5px;
+            color: #333;
+            font-weight: 500;
+        }
+        
+        .upload-form {
+            margin-bottom: 30px;
+        }
+        
+        .file-input-container {
+            position: relative;
+            display: inline-block;
+            margin-bottom: 20px;
+            width: 100%;
+        }
+        
+        .file-input {
+            position: absolute;
+            left: -9999px;
+        }
+        
+        .file-input-label {
+            display: block;
+            padding: 20px;
+            border: 2px dashed #667eea;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            color: #667eea;
+            font-size: 1.1rem;
+        }
+        
+        .file-input-label:hover {
+            background: #f0f4ff;
+            border-color: #5a6fd8;
+        }
+        
+        .file-input-label i {
+            font-size: 2rem;
+            display: block;
+            margin-bottom: 10px;
+        }
+        
+        .upload-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            border-radius: 50px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+        }
+        
+        .upload-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+        }
+        
+        .upload-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .supported-formats {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            color: #666;
+        }
+        
+        .format-item {
+            display: inline-block;
+            margin: 5px 10px;
+            padding: 5px 10px;
+            background: white;
+            border-radius: 15px;
+            font-size: 0.9rem;
+            border: 1px solid #e0e0e0;
+        }
+        
+        .loading {
+            display: none;
+            margin-top: 20px;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <i class="fas fa-qrcode"></i>
+        </div>
+        <h1>Meesho Order Scanner</h1>
+        <p class="subtitle">Upload your manifest file to get started</p>
+        
+        {% if message %}
+        <div class="message">
+            <i class="fas fa-info-circle"></i> {{ message }}
+        </div>
+        {% endif %}
+        
+        <form method="POST" action="/upload" enctype="multipart/form-data" class="upload-form" id="uploadForm">
+            <div class="file-input-container">
+                <input type="file" name="file" accept=".pdf,.csv" required class="file-input" id="fileInput">
+                <label for="fileInput" class="file-input-label" id="fileLabel">
+                    <i class="fas fa-cloud-upload-alt"></i>
+                    <span>Click to select or drag & drop your file</span>
+                </label>
+            </div>
+            <button type="submit" class="upload-btn" id="uploadBtn">
+                <i class="fas fa-upload"></i> Upload File
+            </button>
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>Processing your file...</p>
+            </div>
+        </form>
+        
+        <div class="supported-formats">
+            <strong>Supported formats:</strong><br>
+            <span class="format-item"><i class="fas fa-file-pdf"></i> PDF</span>
+            <span class="format-item"><i class="fas fa-file-csv"></i> CSV</span>
+        </div>
+    </div>
+
+    <script>
+        const fileInput = document.getElementById('fileInput');
+        const fileLabel = document.getElementById('fileLabel');
+        const uploadForm = document.getElementById('uploadForm');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const loading = document.getElementById('loading');
+
+        fileInput.addEventListener('change', function(e) {
+            const fileName = e.target.files[0]?.name;
+            if (fileName) {
+                fileLabel.innerHTML = `
+                    <i class="fas fa-file-check"></i>
+                    <span>Selected: ${fileName}</span>
+                `;
+                fileLabel.style.borderColor = '#28a745';
+                fileLabel.style.color = '#28a745';
+            }
+        });
+
+        uploadForm.addEventListener('submit', function(e) {
+            uploadBtn.disabled = true;
+            uploadBtn.style.display = 'none';
+            loading.style.display = 'block';
+        });
+
+        // Drag and drop functionality
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            fileLabel.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            fileLabel.addEventListener(eventName, highlight, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            fileLabel.addEventListener(eventName, unhighlight, false);
+        });
+
+        function highlight(e) {
+            fileLabel.style.background = '#f0f4ff';
+            fileLabel.style.borderColor = '#5a6fd8';
+        }
+
+        function unhighlight(e) {
+            fileLabel.style.background = '';
+            fileLabel.style.borderColor = '#667eea';
+        }
+
+        fileLabel.addEventListener('drop', handleDrop, false);
+
+        function handleDrop(e) {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            fileInput.files = files;
+            
+            const fileName = files[0]?.name;
+            if (fileName) {
+                fileLabel.innerHTML = `
+                    <i class="fas fa-file-check"></i>
+                    <span>Selected: ${fileName}</span>
+                `;
+                fileLabel.style.borderColor = '#28a745';
+                fileLabel.style.color = '#28a745';
+            }
+        }
+    </script>
+</body>
+</html>
