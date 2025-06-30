@@ -14,28 +14,46 @@ CORS(app)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Use temporary directory for uploads in serverless environments
-UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', 'uploads')
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
-
+# Use /tmp directory for serverless environments (read-write accessible)
+import tempfile
+UPLOAD_FOLDER = '/tmp'  # Vercel allows writing to /tmp
 DATA_FILE = os.path.join(UPLOAD_FOLDER, 'orders.csv')
 
-def read_csv_as_dict(file_path):
+# In-memory storage for serverless environments
+_orders_data = []
+
+def read_csv_as_dict(file_path=None):
     """Read CSV file and return as list of dictionaries"""
-    if not os.path.exists(file_path):
-        return []
+    global _orders_data
     
-    with open(file_path, 'r', newline='', encoding='utf-8') as file:
-        reader = csv.DictReader(file)
-        return list(reader)
+    # Try to read from file first, fallback to in-memory data
+    if file_path and os.path.exists(file_path):
+        try:
+            with open(file_path, 'r', newline='', encoding='utf-8') as file:
+                reader = csv.DictReader(file)
+                _orders_data = list(reader)
+                return _orders_data
+        except Exception as e:
+            logger.error(f"Error reading CSV: {e}")
+    
+    # Return in-memory data or empty list
+    return _orders_data
 
 def write_csv_from_dict(file_path, data, fieldnames):
-    """Write list of dictionaries to CSV file"""
-    with open(file_path, 'w', newline='', encoding='utf-8') as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(data)
+    """Write list of dictionaries to CSV file and update in-memory storage"""
+    global _orders_data
+    
+    # Always update in-memory storage
+    _orders_data = data
+    
+    # Try to write to file (may fail in serverless, but that's ok)
+    try:
+        with open(file_path, 'w', newline='', encoding='utf-8') as file:
+            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(data)
+    except Exception as e:
+        logger.warning(f"Could not write to file (using in-memory storage): {e}")
 
 def get_order_stats(orders):
     """Calculate order statistics"""
@@ -88,14 +106,15 @@ def create_sample_data():
 
 @app.route('/')
 def index():
-    if not os.path.exists(DATA_FILE):
-        # Create sample data for demo purposes
-        create_sample_data()
+    orders = read_csv_as_dict()
+    
+    # Create sample data if no orders exist
+    if not orders:
+        orders = create_sample_data()
         return render_template('index.html', 
                              message="Demo data loaded! Upload your CSV file to replace it.",
-                             total_orders=3)
+                             total_orders=len(orders))
     
-    orders = read_csv_as_dict(DATA_FILE)
     packed_orders = [o for o in orders if o.get('Status') == 'Packed']
     
     return render_template('index.html', 
@@ -113,15 +132,18 @@ def upload_file():
             return jsonify({'error': 'No selected file'}), 400
         
         if file and file.filename.endswith('.csv'):
-            # Save uploaded file temporarily
-            temp_path = os.path.join(UPLOAD_FOLDER, 'temp_' + file.filename)
+            # Create temporary file in /tmp directory
+            temp_path = os.path.join('/tmp', 'temp_' + file.filename)
             file.save(temp_path)
             
             orders = read_csv_as_dict(temp_path)
             
             # Clean up temp file
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception as e:
+                logger.warning(f"Could not remove temp file: {e}")
             
             if orders:
                 # Ensure required columns exist
@@ -146,7 +168,7 @@ def upload_file():
 
 @app.route('/dashboard')
 def dashboard():
-    orders = read_csv_as_dict(DATA_FILE)
+    orders = read_csv_as_dict()
     stats = get_order_stats(orders)
     return render_template('dashboard.html', stats=stats)
 
@@ -159,7 +181,7 @@ def scan_barcode():
         if not barcode:
             return jsonify({'error': 'No barcode provided'}), 400
         
-        orders = read_csv_as_dict(DATA_FILE)
+        orders = read_csv_as_dict()
         found = False
         
         for order in orders:
@@ -199,7 +221,7 @@ def scan_barcode():
 @app.route('/api/stats')
 def get_stats():
     try:
-        orders = read_csv_as_dict(DATA_FILE)
+        orders = read_csv_as_dict()
         stats = get_order_stats(orders)
         return jsonify(stats)
     except Exception as e:
@@ -209,7 +231,7 @@ def get_stats():
 @app.route('/api/orders')
 def get_orders():
     try:
-        orders = read_csv_as_dict(DATA_FILE)
+        orders = read_csv_as_dict()
         return jsonify(orders)
     except Exception as e:
         logger.error(f"Orders API error: {str(e)}")
@@ -218,10 +240,25 @@ def get_orders():
 @app.route('/download')
 def download_csv():
     try:
-        if os.path.exists(DATA_FILE):
-            return send_file(DATA_FILE, as_attachment=True, download_name='updated_orders.csv')
+        orders = read_csv_as_dict()
+        if orders:
+            # Create temporary CSV file for download
+            import io
+            output = io.StringIO()
+            fieldnames = list(orders[0].keys()) if orders else []
+            writer = csv.DictWriter(output, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(orders)
+            
+            # Create downloadable response
+            from flask import Response
+            return Response(
+                output.getvalue(),
+                mimetype='text/csv',
+                headers={"Content-disposition": "attachment; filename=updated_orders.csv"}
+            )
         else:
-            return jsonify({'error': 'No data file found'}), 404
+            return jsonify({'error': 'No data available'}), 404
     except Exception as e:
         logger.error(f"Download error: {str(e)}")
         return jsonify({'error': str(e)}), 500
@@ -229,8 +266,14 @@ def download_csv():
 @app.route('/reset', methods=['POST'])
 def reset_data():
     try:
-        if os.path.exists(DATA_FILE):
-            os.remove(DATA_FILE)
+        global _orders_data
+        _orders_data = []  # Clear in-memory data
+        # Try to remove file if it exists (may fail in serverless, but that's ok)
+        try:
+            if os.path.exists(DATA_FILE):
+                os.remove(DATA_FILE)
+        except Exception as e:
+            logger.warning(f"Could not remove file: {e}")
         return jsonify({'success': True, 'message': 'Data reset successfully'})
     except Exception as e:
         logger.error(f"Reset error: {str(e)}")
