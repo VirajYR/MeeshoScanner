@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -58,16 +59,6 @@
             border-radius: 5px;
             color: #333;
             font-weight: 500;
-        }
-        
-        .message.error {
-            background-color: #fee;
-            color: #c33;
-            border: 1px solid #fcc;
-        }
-        
-        .message.error i {
-            color: #c33;
         }
         
         .upload-form {
@@ -180,14 +171,14 @@
         <p class="subtitle">Upload your manifest file to get started</p>
         
         {% if message %}
-        <div class="message{% if error %} error{% endif %}">
-            <i class="fas fa-{% if error %}exclamation-triangle{% else %}info-circle{% endif %}"></i> {{ message }}
+        <div class="message">
+            <i class="fas fa-info-circle"></i> {{ message }}
         </div>
         {% endif %}
         
         <form method="POST" action="/upload" enctype="multipart/form-data" class="upload-form" id="uploadForm">
             <div class="file-input-container">
-                <input type="file" name="file" accept=".csv" required class="file-input" id="fileInput">
+                <input type="file" name="file" accept=".pdf,.csv" required class="file-input" id="fileInput">
                 <label for="fileInput" class="file-input-label" id="fileLabel">
                     <i class="fas fa-cloud-upload-alt"></i>
                     <span>Click to select or drag & drop your file</span>
@@ -204,7 +195,7 @@
         
         <div class="supported-formats">
             <strong>Supported formats:</strong><br>
-            <span class="format-item"><i class="fas fa-file-csv"></i> CSV Only</span>
+            <span class="format-item"><i class="fas fa-file-pdf"></i> PDF</span>
             <span class="format-item"><i class="fas fa-file-csv"></i> CSV</span>
         </div>
     </div>

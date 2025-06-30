@@ -1,372 +1,411 @@
-from flask import Flask, render_template, request, redirect, url_for, jsonify, send_file
 import os
-import csv
-import json
+from flask import Flask, render_template, request, redirect, url_for, jsonify, send_file
+import pandas as pd
 from datetime import datetime
+import fitz  # PyMuPDF
 from flask_cors import CORS
 import re
 import logging
+from logging.handlers import RotatingFileHandler
+
+# Import configuration
+try:
+    from config import config
+except ImportError:
+    config = None
 
 app = Flask(__name__)
 CORS(app)
 
+# Configure based on environment
+if config:
+    env = os.environ.get('FLASK_ENV', 'production')
+    app.config.from_object(config.get(env, config['default']))
+else:
+    # Fallback configuration
+    app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'fallback-secret-key')
+    app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+
 # Configure logging
+if not app.debug:
+    if not os.path.exists('logs'):
+        os.mkdir('logs')
+    file_handler = RotatingFileHandler('logs/app.log', maxBytes=10240000, backupCount=10)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+    ))
+    file_handler.setLevel(logging.INFO)
+    app.logger.addHandler(file_handler)
+    app.logger.setLevel(logging.INFO)
+    app.logger.info('Meesho Order Scanner startup')
+
+# Original logging setup for compatibility
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Use /tmp directory for serverless environments (read-write accessible)
-import tempfile
-UPLOAD_FOLDER = '/tmp'  # Vercel allows writing to /tmp
+UPLOAD_FOLDER = 'uploads'
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
 DATA_FILE = os.path.join(UPLOAD_FOLDER, 'orders.csv')
-
-# In-memory storage for serverless environments
-_orders_data = []
-
-def read_csv_as_dict(file_path=None):
-    """Read CSV file and return as list of dictionaries"""
-    global _orders_data
-    
-    # Try to read from file first, fallback to in-memory data
-    if file_path and os.path.exists(file_path):
-        try:
-            with open(file_path, 'r', newline='', encoding='utf-8') as file:
-                reader = csv.DictReader(file)
-                _orders_data = list(reader)
-                return _orders_data
-        except Exception as e:
-            logger.error(f"Error reading CSV: {e}")
-    
-    # Return in-memory data or empty list
-    return _orders_data
-
-def write_csv_from_dict(file_path, data, fieldnames):
-    """Write list of dictionaries to CSV file and update in-memory storage"""
-    global _orders_data
-    
-    # Always update in-memory storage
-    _orders_data = data
-    
-    # Try to write to file (may fail in serverless, but that's ok)
-    try:
-        with open(file_path, 'w', newline='', encoding='utf-8') as file:
-            writer = csv.DictWriter(file, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(data)
-    except Exception as e:
-        logger.warning(f"Could not write to file (using in-memory storage): {e}")
-
-def get_order_stats(orders):
-    """Calculate order statistics"""
-    total = len(orders)
-    packed = len([o for o in orders if o.get('Status') == 'Packed'])
-    in_transit = len([o for o in orders if o.get('Status') == 'In Transit'])
-    delivered = len([o for o in orders if o.get('Status') == 'Delivered'])
-    return {
-        'total': total,
-        'packed': packed,
-        'in_transit': in_transit,
-        'delivered': delivered
-    }
-
-def create_sample_data():
-    """Create sample order data for testing"""
-    sample_orders = [
-        {
-            'Order ID': 'MSO001',
-            'Product': 'Samsung Galaxy Case',
-            'Quantity': '1',
-            'Customer': 'John Doe',
-            'Address': '123 Main St, Mumbai',
-            'Status': 'Packed',
-            'Tracking Number': 'TRK001'
-        },
-        {
-            'Order ID': 'MSO002',
-            'Product': 'iPhone Charger',
-            'Quantity': '2',
-            'Customer': 'Jane Smith',
-            'Address': '456 Park Ave, Delhi',
-            'Status': 'Packed',
-            'Tracking Number': 'TRK002'
-        },
-        {
-            'Order ID': 'MSO003',
-            'Product': 'Bluetooth Headphones',
-            'Quantity': '1',
-            'Customer': 'Mike Johnson',
-            'Address': '789 Oak St, Bangalore',
-            'Status': 'In Transit',
-            'Tracking Number': 'TRK003'
-        }
-    ]
-    
-    fieldnames = ['Order ID', 'Product', 'Quantity', 'Customer', 'Address', 'Status', 'Tracking Number']
-    write_csv_from_dict(DATA_FILE, sample_orders, fieldnames)
-    return sample_orders
 
 @app.route('/')
 def index():
-    orders = read_csv_as_dict()
-    
-    # Create sample data if no orders exist
-    if not orders:
-        orders = create_sample_data()
-        return render_template('index.html', 
-                             message="Demo data loaded! Upload your CSV file to replace it.",
-                             total_orders=len(orders))
-    
-    packed_orders = [o for o in orders if o.get('Status') == 'Packed']
-    
-    return render_template('index.html', 
-                         message=f"Ready to scan! {len(packed_orders)} orders pending.",
-                         total_orders=len(orders))
+    if not os.path.exists(DATA_FILE):
+        return render_template('index.html', message="Please upload your manifest PDF file.")
+    df = pd.read_csv(DATA_FILE)
+    packed = df[df['Status'] == 'Packed']
+    pending = df[df['Status'] == 'Pending']
+    cancelled = df[df['Status'] == 'Cancelled']
+    return render_template('dashboard.html', packed=len(packed), pending=len(pending), cancelled=len(cancelled), table=df.to_dict(orient='records'))
 
 @app.route('/upload', methods=['POST'])
-def upload_file():
+def upload():
     try:
         if 'file' not in request.files:
-            # Check if it's an AJAX request
-            if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-                return jsonify({'error': 'No file part'}), 400
-            else:
-                return render_template('index.html', 
-                                    message="No file selected. Please choose a file to upload.",
-                                    error=True)
+            return render_template('index.html', message="No file selected. Please choose a file to upload.")
         
         file = request.files['file']
         if file.filename == '':
-            # Check if it's an AJAX request
-            if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-                return jsonify({'error': 'No selected file'}), 400
-            else:
-                return render_template('index.html', 
-                                    message="No file selected. Please choose a file to upload.",
-                                    error=True)
+            return render_template('index.html', message="No file selected. Please choose a file to upload.")
+
+        filename = file.filename.lower()
+        logger.info(f"Processing file: {filename}")
         
-        if file and file.filename.endswith('.csv'):
-            # Create temporary file in /tmp directory
-            temp_path = os.path.join('/tmp', 'temp_' + file.filename)
-            file.save(temp_path)
-            
-            orders = read_csv_as_dict(temp_path)
-            
-            # Debug: Log what we found in the CSV
-            logger.info(f"Found {len(orders)} orders in CSV")
-            if orders:
-                logger.info(f"First order keys: {list(orders[0].keys())}")
-                logger.info(f"First order data: {orders[0]}")
-            
-            # Clean up temp file
-            try:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-            except Exception as e:
-                logger.warning(f"Could not remove temp file: {e}")
-            
-            if orders:
-                # Map common column variations to standard names
-                column_mappings = {
-                    'Order ID': ['order_id', 'orderid', 'order id', 'order_number', 'order number', 'id'],
-                    'Product': ['product', 'item', 'product_name', 'item_name', 'product name', 'item name'],
-                    'Quantity': ['quantity', 'qty', 'amount', 'count'],
-                    'Customer': ['customer', 'customer_name', 'buyer', 'buyer_name', 'customer name', 'buyer name'],
-                    'Address': ['address', 'delivery_address', 'shipping_address', 'delivery address', 'shipping address'],
-                    'Status': ['status', 'order_status', 'order status', 'state'],
-                    'Tracking Number': ['tracking_number', 'tracking number', 'awb', 'tracking_id', 'tracking id', 'track_id']
-                }
-                
-                # Normalize orders with flexible column mapping
-                normalized_orders = []
-                for order in orders:
-                    normalized_order = {}
-                    order_keys_lower = {k.lower().strip(): k for k in order.keys()}
-                    
-                    for standard_field, variations in column_mappings.items():
-                        found_value = ''
-                        # Try exact match first
-                        if standard_field in order:
-                            found_value = order[standard_field]
-                        else:
-                            # Try variations
-                            for variation in variations:
-                                if variation in order_keys_lower:
-                                    found_value = order[order_keys_lower[variation]]
-                                    break
-                        normalized_order[standard_field] = str(found_value).strip()
-                    
-                    # Set default status if empty
-                    if not normalized_order.get('Status'):
-                        normalized_order['Status'] = 'Packed'
-                    
-                    normalized_orders.append(normalized_order)
-                
-                logger.info(f"Normalized {len(normalized_orders)} orders")
-                if normalized_orders:
-                    logger.info(f"First normalized order: {normalized_orders[0]}")
-                
+        # Remove existing data file
+        if os.path.exists(DATA_FILE):
+            os.remove(DATA_FILE)
+
+        try:
+            if filename.endswith('.pdf'):
+                logger.info("Processing PDF file...")
+                pdf_text = extract_text_from_pdf(file)
+                df = parse_pdf_to_dataframe(pdf_text)
+                logger.info(f"Extracted {len(df)} orders from PDF")
+            elif filename.endswith('.csv'):
+                logger.info("Processing CSV file...")
+                df = pd.read_csv(file)
                 # Ensure required columns exist
-                fieldnames = ['Order ID', 'Product', 'Quantity', 'Customer', 'Address', 'Status', 'Tracking Number']
-                
-                write_csv_from_dict(DATA_FILE, normalized_orders, fieldnames)
-                
-                # Check if it's an AJAX request
-                if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-                    return jsonify({'success': True, 'message': f'Successfully processed {len(normalized_orders)} orders'})
-                else:
-                    # Redirect to dashboard for regular form submission
-                    return redirect(url_for('dashboard'))
+                required_columns = ['Order ID', 'AWB ID', 'Courier', 'SKU', 'Qty']
+                for col in required_columns:
+                    if col not in df.columns:
+                        df[col] = 'Unknown'
+                logger.info(f"Loaded {len(df)} orders from CSV")
             else:
-                # Check if it's an AJAX request
-                if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-                    return jsonify({'error': 'No orders found in the file'}), 400
-                else:
-                    return render_template('index.html', 
-                                        message="No orders found in the file. Please check your CSV format.",
-                                        error=True)
-        else:
-            # Check if it's an AJAX request
-            if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-                return jsonify({'error': 'Invalid file type. Please upload CSV files only. PDF support temporarily disabled for deployment.'}), 400
-            else:
-                return render_template('index.html', 
-                                    message="Invalid file type. Please upload CSV files only.",
-                                    error=True)
-    
+                return render_template('index.html', message="Unsupported file format. Please upload a PDF or CSV file.")
+
+            if df.empty:
+                return render_template('index.html', message="No valid data found in the uploaded file. Please check the file format and content.")
+
+            # Initialize status columns
+            df['Status'] = 'Pending'
+            df['Scanned Time'] = ''
+            
+            # Ensure correct data types
+            df['Status'] = df['Status'].astype(str)
+            df['Scanned Time'] = df['Scanned Time'].astype(str)
+            df['AWB ID'] = df['AWB ID'].astype(str)
+            df['Order ID'] = df['Order ID'].astype(str)
+            
+            # Clean and validate data
+            df = df.dropna(subset=['AWB ID'])  # Remove rows without AWB ID
+            df['AWB ID'] = df['AWB ID'].astype(str).str.strip()  # Clean AWB IDs
+            df = df[df['AWB ID'] != '']  # Remove empty AWB IDs
+            
+            if df.empty:
+                return render_template('index.html', message="No valid AWB IDs found in the uploaded file.")
+            
+            df.to_csv(DATA_FILE, index=False)
+            logger.info(f"Successfully saved {len(df)} orders to {DATA_FILE}")
+            
+        except Exception as e:
+            logger.error(f"Error processing file: {str(e)}")
+            return render_template('index.html', message=f"Error processing file: {str(e)}. Please ensure the file is not corrupted and contains valid data.")
+
     except Exception as e:
-        logger.error(f"Upload error: {str(e)}")
-        # Check if it's an AJAX request
-        if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-            return jsonify({'error': f'Upload failed: {str(e)}'}), 500
-        else:
-            return render_template('index.html', 
-                                message=f"Upload failed: {str(e)}",
-                                error=True)
+        logger.error(f"Upload failed: {str(e)}")
+        return render_template('index.html', message=f"Upload failed: {str(e)}")
 
-@app.route('/dashboard')
-def dashboard():
-    orders = read_csv_as_dict()
-    logger.info(f"Dashboard: Found {len(orders)} orders in memory")
-    if orders:
-        logger.info(f"Dashboard: First order: {orders[0]}")
-    stats = get_order_stats(orders)
-    logger.info(f"Dashboard: Stats: {stats}")
-    return render_template('dashboard.html', stats=stats)
+    return redirect(url_for('index'))
 
-@app.route('/api/scan', methods=['POST'])
-def scan_barcode():
+def extract_text_from_pdf(file):
+    """Extract text from PDF file with improved error handling"""
+    try:
+        text = ""
+        file_content = file.read()
+        doc = fitz.open(stream=file_content, filetype="pdf")
+        
+        for page_num, page in enumerate(doc):
+            try:
+                page_text = page.get_text()
+                text += page_text + "\n"
+                logger.info(f"Extracted text from page {page_num + 1}")
+            except Exception as e:
+                logger.warning(f"Error extracting text from page {page_num + 1}: {str(e)}")
+                continue
+        
+        doc.close()
+        logger.info(f"Successfully extracted {len(text)} characters from PDF")
+        return text
+    except Exception as e:
+        logger.error(f"Error opening PDF: {str(e)}")
+        raise Exception(f"Could not read PDF file: {str(e)}")
+
+def parse_pdf_to_dataframe(text):
+    """Parse PDF text to DataFrame with improved pattern matching"""
+    rows = []
+    lines = text.splitlines()
+    
+    # Improved patterns for different courier services
+    awb_patterns = {
+        'Valmo': r'VL\d+',
+        'Xpress Bees': r'134\d+',
+        'Delhivery': r'1490\d+',
+        'Generic': r'[A-Z]{2,3}\d{8,}'
+    }
+    
+    order_patterns = [
+        r'16\d{10,}',  # 16 followed by digits
+        r'17\d{10,}',  # 17 followed by digits
+        r'\d{12,15}'   # 12-15 digit numbers
+    ]
+    
+    sku_keywords = {
+        'Together': ['Together'],
+        'Divine Aura': ['Divine Aura', 'Aura'],
+        'Mystic Aura': ['Mystic Aura'],
+        'Vibrant': ['Vibrant']
+    }
+    
+    logger.info(f"Processing {len(lines)} lines from PDF")
+    
+    for line_num, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+            
+        try:
+            # Find AWB ID
+            awb = None
+            courier = "Unknown"
+            
+            for courier_name, pattern in awb_patterns.items():
+                matches = re.findall(pattern, line, re.IGNORECASE)
+                if matches:
+                    awb = matches[0]
+                    courier = courier_name
+                    break
+            
+            if not awb:
+                continue
+            
+            # Find Order ID
+            order = None
+            for pattern in order_patterns:
+                matches = re.findall(pattern, line)
+                if matches:
+                    order = matches[0]
+                    break
+            
+            if not order:
+                order = "Unknown"
+            
+            # Determine SKU
+            sku = "Unknown"
+            for sku_name, keywords in sku_keywords.items():
+                if any(keyword.lower() in line.lower() for keyword in keywords):
+                    sku = sku_name
+                    break
+            
+            rows.append([order, awb, courier, sku, 1])
+            logger.debug(f"Line {line_num + 1}: Found order {order}, AWB {awb}, courier {courier}, SKU {sku}")
+            
+        except Exception as e:
+            logger.warning(f"Error processing line {line_num + 1}: {str(e)}")
+            continue
+    
+    df = pd.DataFrame(rows, columns=['Order ID', 'AWB ID', 'Courier', 'SKU', 'Qty'])
+    logger.info(f"Successfully parsed {len(df)} orders from PDF")
+    
+    return df
+
+@app.route('/scan', methods=['POST'])
+def scan():
     try:
         data = request.get_json()
-        barcode = data.get('barcode', '').strip()
+        if not data:
+            return jsonify({'success': False, 'message': 'No data received'})
         
-        if not barcode:
-            return jsonify({'error': 'No barcode provided'}), 400
+        awb_id = data.get('awb_id', '').strip()
+        if not awb_id:
+            return jsonify({'success': False, 'message': 'No AWB ID provided'})
+
+        logger.info(f"Scanning AWB ID: {awb_id}")
         
-        orders = read_csv_as_dict()
-        found = False
+        if not os.path.exists(DATA_FILE):
+            return jsonify({'success': False, 'message': 'No manifest data found. Please upload a file first.'})
+
+        df = pd.read_csv(DATA_FILE)
         
-        for order in orders:
-            if (order.get('Order ID', '').strip() == barcode or 
-                order.get('Tracking Number', '').strip() == barcode):
+        # Clean AWB ID for comparison
+        awb_id_clean = str(awb_id).strip()
+        df['AWB ID'] = df['AWB ID'].astype(str).str.strip()
+        
+        match = df['AWB ID'] == awb_id_clean
+
+        if match.any():
+            current_status = df.loc[match, 'Status'].values[0]
+            logger.info(f"AWB {awb_id} found with status: {current_status}")
+            
+            if current_status == 'Packed':
+                return jsonify({'success': False, 'message': 'Already Packed', 'status': 'Packed'})
+            elif current_status == 'Cancelled':
+                return jsonify({'success': False, 'message': 'This item was previously cancelled.', 'status': 'Cancelled'})
+            else:
+                # Mark as packed
+                df.loc[match, 'Status'] = 'Packed'
+                current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                df.loc[match, 'Scanned Time'] = current_time
+                df.to_csv(DATA_FILE, index=False)
+                logger.info(f"AWB {awb_id} marked as Packed")
                 
-                if order.get('Status') == 'Packed':
-                    order['Status'] = 'In Transit'
-                    order['Scanned At'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    found = True
-                    break
-                else:
-                    return jsonify({
-                        'error': f'Order {barcode} is already {order.get("Status", "processed")}'
-                    }), 400
-        
-        if found:
-            fieldnames = list(orders[0].keys()) if orders else []
-            if 'Scanned At' not in fieldnames:
-                fieldnames.append('Scanned At')
-            
-            write_csv_from_dict(DATA_FILE, orders, fieldnames)
-            
-            stats = get_order_stats(orders)
-            return jsonify({
-                'success': True,
-                'message': f'Order {barcode} marked as In Transit',
-                'stats': stats
-            })
+                # Return updated stats for dashboard
+                packed = len(df[df['Status'] == 'Packed'])
+                pending = len(df[df['Status'] == 'Pending'])
+                cancelled = len(df[df['Status'] == 'Cancelled'])
+                
+                return jsonify({
+                    'success': True, 
+                    'message': f'AWB {awb_id} marked as Packed',
+                    'status': 'Packed',
+                    'stats': {
+                        'packed': packed,
+                        'pending': pending,
+                        'cancelled': cancelled,
+                        'total': len(df)
+                    }
+                })
         else:
-            return jsonify({'error': f'Order {barcode} not found'}), 404
-    
+            # AWB not found in manifest - add as cancelled
+            logger.info(f"AWB {awb_id} not found in manifest, adding as cancelled")
+            current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            new_row = pd.DataFrame([[
+                "Unknown", 
+                awb_id_clean, 
+                "Unknown", 
+                "Unknown", 
+                1, 
+                "Cancelled", 
+                current_time
+            ]], columns=['Order ID', 'AWB ID', 'Courier', 'SKU', 'Qty', 'Status', 'Scanned Time'])
+            
+            df = pd.concat([df, new_row], ignore_index=True)
+            df.to_csv(DATA_FILE, index=False)
+            
+            # Return updated stats for dashboard
+            packed = len(df[df['Status'] == 'Packed'])
+            pending = len(df[df['Status'] == 'Pending'])
+            cancelled = len(df[df['Status'] == 'Cancelled'])
+            
+            return jsonify({
+                'success': True, 
+                'message': f'AWB {awb_id} not found in manifest - marked as Cancelled',
+                'status': 'Cancelled', 
+                'confirm': True,
+                'stats': {
+                    'packed': packed,
+                    'pending': pending,
+                    'cancelled': cancelled,
+                    'total': len(df)
+                }
+            })
+            
     except Exception as e:
-        logger.error(f"Scan error: {str(e)}")
-        return jsonify({'error': f'Scan failed: {str(e)}'}), 500
+        logger.error(f"Error in scan endpoint: {str(e)}")
+        return jsonify({'success': False, 'message': f'Error processing scan: {str(e)}'})
+
+@app.route('/delete', methods=['POST'])
+def delete_entry():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'message': 'No data received'})
+        
+        awb_id = data.get('awb_id', '').strip()
+        if not awb_id:
+            return jsonify({'success': False, 'message': 'No AWB ID provided'})
+
+        logger.info(f"Deleting AWB ID: {awb_id}")
+        
+        if not os.path.exists(DATA_FILE):
+            return jsonify({'success': False, 'message': 'No data file found'})
+
+        df = pd.read_csv(DATA_FILE)
+        initial_count = len(df)
+        
+        # Clean AWB ID for comparison
+        awb_id_clean = str(awb_id).strip()
+        df['AWB ID'] = df['AWB ID'].astype(str).str.strip()
+        
+        df = df[df['AWB ID'] != awb_id_clean]
+        final_count = len(df)
+        
+        if initial_count == final_count:
+            return jsonify({'success': False, 'message': f'AWB ID {awb_id} not found'})
+        
+        df.to_csv(DATA_FILE, index=False)
+        logger.info(f"AWB {awb_id} deleted successfully")
+        return jsonify({'success': True, 'message': f'AWB ID {awb_id} deleted successfully.'})
+        
+    except Exception as e:
+        logger.error(f"Error in delete endpoint: {str(e)}")
+        return jsonify({'success': False, 'message': f'Error deleting entry: {str(e)}'})
+
+@app.route('/export')
+def export():
+    try:
+        if not os.path.exists(DATA_FILE):
+            return redirect(url_for('index'))
+        
+        return send_file(DATA_FILE, as_attachment=True, download_name='orders_export.csv')
+    except Exception as e:
+        logger.error(f"Error in export: {str(e)}")
+        return redirect(url_for('index'))
+
+@app.route('/test', methods=['GET'])
+def test():
+    """Test endpoint to check if server is working"""
+    return jsonify({'status': 'OK', 'message': 'Server is working correctly'})
 
 @app.route('/api/stats')
 def get_stats():
     try:
-        orders = read_csv_as_dict()
-        stats = get_order_stats(orders)
-        return jsonify(stats)
+        if not os.path.exists(DATA_FILE):
+            return jsonify({'packed': 0, 'pending': 0, 'cancelled': 0, 'total': 0})
+        
+        df = pd.read_csv(DATA_FILE)
+        packed = len(df[df['Status'] == 'Packed'])
+        pending = len(df[df['Status'] == 'Pending'])
+        cancelled = len(df[df['Status'] == 'Cancelled'])
+        
+        return jsonify({
+            'packed': packed,
+            'pending': pending,
+            'cancelled': cancelled,
+            'total': len(df)
+        })
     except Exception as e:
-        logger.error(f"Stats error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error getting stats: {str(e)}")
+        return jsonify({'packed': 0, 'pending': 0, 'cancelled': 0, 'total': 0})
 
-@app.route('/api/orders')
-def get_orders():
-    try:
-        orders = read_csv_as_dict()
-        logger.info(f"API orders: Found {len(orders)} orders")
-        return jsonify(orders)
-    except Exception as e:
-        logger.error(f"Orders API error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/download')
-def download_csv():
-    try:
-        orders = read_csv_as_dict()
-        if orders:
-            # Create temporary CSV file for download
-            import io
-            output = io.StringIO()
-            fieldnames = list(orders[0].keys()) if orders else []
-            writer = csv.DictWriter(output, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(orders)
-            
-            # Create downloadable response
-            from flask import Response
-            return Response(
-                output.getvalue(),
-                mimetype='text/csv',
-                headers={"Content-disposition": "attachment; filename=updated_orders.csv"}
-            )
-        else:
-            return jsonify({'error': 'No data available'}), 404
-    except Exception as e:
-        logger.error(f"Download error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/reset', methods=['POST'])
-def reset_data():
-    try:
-        global _orders_data
-        _orders_data = []  # Clear in-memory data
-        # Try to remove file if it exists (may fail in serverless, but that's ok)
-        try:
-            if os.path.exists(DATA_FILE):
-                os.remove(DATA_FILE)
-        except Exception as e:
-            logger.warning(f"Could not remove file: {e}")
-        return jsonify({'success': True, 'message': 'Data reset successfully'})
-    except Exception as e:
-        logger.error(f"Reset error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.errorhandler(404)
-def not_found_error(error):
-    return jsonify({'error': 'Endpoint not found'}), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({'error': 'Internal server error'}), 500
+@app.route('/health')
+def health_check():
+    """Health check endpoint for monitoring"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'version': '1.0.0'
+    })
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)

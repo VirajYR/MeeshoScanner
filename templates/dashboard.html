@@ -556,8 +556,7 @@
                 if (cameras && cameras.length) {
                     const cameraId = cameras.find(camera => 
                         camera.label.toLowerCase().includes('back') || 
-                        camera.label.toLowerCase().includes('rear') ||
-                        camera.label.toLowerCase().includes('environment')
+                        camera.label.toLowerCase().includes('rear')
                     )?.id || cameras[0].id;
                     
                     scannerInstance.start(
@@ -656,18 +655,23 @@
                     type = 'error';
                     console.log(`[SCAN] Server returned error: ${message}`);
                 } else if (data.status === 'Packed') {
-                    if (data.message === 'Already Packed') {
+                    if (data.message && data.message.includes('Already Packed')) {
                         message = `⚠️ AWB ID ${decodedText} is already packed`;
                         type = 'warning';
                     } else {
                         message = `✅ AWB ID ${decodedText} marked as Packed`;
-                        updateStats('packed', 1);
-                        updateStats('pending', -1);
+                        // Update stats from server response
+                        if (data.stats) {
+                            updateStatsFromServer(data.stats);
+                        }
                     }
                 } else if (data.status === 'Cancelled' && data.confirm) {
                     message = `❌ AWB ID ${decodedText} not found in manifest - marked as Cancelled`;
                     type = 'error';
-                    updateStats('cancelled', 1);
+                    // Update stats from server response
+                    if (data.stats) {
+                        updateStatsFromServer(data.stats);
+                    }
                 } else if (data.status === 'Cancelled') {
                     message = `❌ AWB ID ${decodedText} was previously cancelled`;
                     type = 'error';
@@ -822,6 +826,19 @@
                 const newValue = Math.max(0, currentValue + change);
                 statCard.textContent = newValue;
             }
+        }
+
+        function updateStatsFromServer(stats) {
+            // Update all stats from server response
+            const packedCard = document.querySelector('.stat-card.packed .number');
+            const pendingCard = document.querySelector('.stat-card.pending .number');
+            const cancelledCard = document.querySelector('.stat-card.cancelled .number');
+            const totalCard = document.querySelector('.stat-card.total .number');
+            
+            if (packedCard) packedCard.textContent = stats.packed || 0;
+            if (pendingCard) pendingCard.textContent = stats.pending || 0;
+            if (cancelledCard) cancelledCard.textContent = stats.cancelled || 0;
+            if (totalCard) totalCard.textContent = stats.total || 0;
         }
 
         function updateTableRow(awbId, status) {
