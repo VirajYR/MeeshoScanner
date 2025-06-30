@@ -125,11 +125,23 @@ def index():
 def upload_file():
     try:
         if 'file' not in request.files:
-            return jsonify({'error': 'No file part'}), 400
+            # Check if it's an AJAX request
+            if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return jsonify({'error': 'No file part'}), 400
+            else:
+                return render_template('index.html', 
+                                    message="No file selected. Please choose a file to upload.",
+                                    error=True)
         
         file = request.files['file']
         if file.filename == '':
-            return jsonify({'error': 'No selected file'}), 400
+            # Check if it's an AJAX request
+            if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return jsonify({'error': 'No selected file'}), 400
+            else:
+                return render_template('index.html', 
+                                    message="No file selected. Please choose a file to upload.",
+                                    error=True)
         
         if file and file.filename.endswith('.csv'):
             # Create temporary file in /tmp directory
@@ -156,15 +168,39 @@ def upload_file():
                         order['Status'] = 'Packed'
                 
                 write_csv_from_dict(DATA_FILE, orders, fieldnames)
-                return jsonify({'success': True, 'message': f'Successfully processed {len(orders)} orders'})
+                
+                # Check if it's an AJAX request
+                if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                    return jsonify({'success': True, 'message': f'Successfully processed {len(orders)} orders'})
+                else:
+                    # Redirect to dashboard for regular form submission
+                    return redirect(url_for('dashboard'))
             else:
-                return jsonify({'error': 'No orders found in the file'}), 400
+                # Check if it's an AJAX request
+                if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                    return jsonify({'error': 'No orders found in the file'}), 400
+                else:
+                    return render_template('index.html', 
+                                        message="No orders found in the file. Please check your CSV format.",
+                                        error=True)
         else:
-            return jsonify({'error': 'Invalid file type. Please upload CSV files only. PDF support temporarily disabled for deployment.'}), 400
+            # Check if it's an AJAX request
+            if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return jsonify({'error': 'Invalid file type. Please upload CSV files only. PDF support temporarily disabled for deployment.'}), 400
+            else:
+                return render_template('index.html', 
+                                    message="Invalid file type. Please upload CSV files only.",
+                                    error=True)
     
     except Exception as e:
         logger.error(f"Upload error: {str(e)}")
-        return jsonify({'error': f'Upload failed: {str(e)}'}), 500
+        # Check if it's an AJAX request
+        if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({'error': f'Upload failed: {str(e)}'}), 500
+        else:
+            return render_template('index.html', 
+                                message=f"Upload failed: {str(e)}",
+                                error=True)
 
 @app.route('/dashboard')
 def dashboard():
