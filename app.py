@@ -150,6 +150,12 @@ def upload_file():
             
             orders = read_csv_as_dict(temp_path)
             
+            # Debug: Log what we found in the CSV
+            logger.info(f"Found {len(orders)} orders in CSV")
+            if orders:
+                logger.info(f"First order keys: {list(orders[0].keys())}")
+                logger.info(f"First order data: {orders[0]}")
+            
             # Clean up temp file
             try:
                 if os.path.exists(temp_path):
@@ -158,20 +164,54 @@ def upload_file():
                 logger.warning(f"Could not remove temp file: {e}")
             
             if orders:
+                # Map common column variations to standard names
+                column_mappings = {
+                    'Order ID': ['order_id', 'orderid', 'order id', 'order_number', 'order number', 'id'],
+                    'Product': ['product', 'item', 'product_name', 'item_name', 'product name', 'item name'],
+                    'Quantity': ['quantity', 'qty', 'amount', 'count'],
+                    'Customer': ['customer', 'customer_name', 'buyer', 'buyer_name', 'customer name', 'buyer name'],
+                    'Address': ['address', 'delivery_address', 'shipping_address', 'delivery address', 'shipping address'],
+                    'Status': ['status', 'order_status', 'order status', 'state'],
+                    'Tracking Number': ['tracking_number', 'tracking number', 'awb', 'tracking_id', 'tracking id', 'track_id']
+                }
+                
+                # Normalize orders with flexible column mapping
+                normalized_orders = []
+                for order in orders:
+                    normalized_order = {}
+                    order_keys_lower = {k.lower().strip(): k for k in order.keys()}
+                    
+                    for standard_field, variations in column_mappings.items():
+                        found_value = ''
+                        # Try exact match first
+                        if standard_field in order:
+                            found_value = order[standard_field]
+                        else:
+                            # Try variations
+                            for variation in variations:
+                                if variation in order_keys_lower:
+                                    found_value = order[order_keys_lower[variation]]
+                                    break
+                        normalized_order[standard_field] = str(found_value).strip()
+                    
+                    # Set default status if empty
+                    if not normalized_order.get('Status'):
+                        normalized_order['Status'] = 'Packed'
+                    
+                    normalized_orders.append(normalized_order)
+                
+                logger.info(f"Normalized {len(normalized_orders)} orders")
+                if normalized_orders:
+                    logger.info(f"First normalized order: {normalized_orders[0]}")
+                
                 # Ensure required columns exist
                 fieldnames = ['Order ID', 'Product', 'Quantity', 'Customer', 'Address', 'Status', 'Tracking Number']
-                for order in orders:
-                    for field in fieldnames:
-                        if field not in order:
-                            order[field] = ''
-                    if not order.get('Status'):
-                        order['Status'] = 'Packed'
                 
-                write_csv_from_dict(DATA_FILE, orders, fieldnames)
+                write_csv_from_dict(DATA_FILE, normalized_orders, fieldnames)
                 
                 # Check if it's an AJAX request
                 if request.headers.get('Content-Type') == 'application/json' or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-                    return jsonify({'success': True, 'message': f'Successfully processed {len(orders)} orders'})
+                    return jsonify({'success': True, 'message': f'Successfully processed {len(normalized_orders)} orders'})
                 else:
                     # Redirect to dashboard for regular form submission
                     return redirect(url_for('dashboard'))
@@ -205,7 +245,11 @@ def upload_file():
 @app.route('/dashboard')
 def dashboard():
     orders = read_csv_as_dict()
+    logger.info(f"Dashboard: Found {len(orders)} orders in memory")
+    if orders:
+        logger.info(f"Dashboard: First order: {orders[0]}")
     stats = get_order_stats(orders)
+    logger.info(f"Dashboard: Stats: {stats}")
     return render_template('dashboard.html', stats=stats)
 
 @app.route('/api/scan', methods=['POST'])
@@ -268,6 +312,7 @@ def get_stats():
 def get_orders():
     try:
         orders = read_csv_as_dict()
+        logger.info(f"API orders: Found {len(orders)} orders")
         return jsonify(orders)
     except Exception as e:
         logger.error(f"Orders API error: {str(e)}")
