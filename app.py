@@ -105,10 +105,15 @@ def upload():
 
         try:
             if filename.endswith('.pdf'):
-                logger.info("Processing PDF file...")
+                logger.info("Processing PDF manifest file...")
                 pdf_text = extract_text_from_pdf(file)
                 df = parse_pdf_to_dataframe(pdf_text)
-                logger.info(f"Extracted {len(df)} orders from PDF")
+                logger.info(f"Extracted {len(df)} orders from PDF manifest")
+                
+                # Log extraction summary
+                if not df.empty:
+                    unique_couriers = df['Courier'].unique()
+                    logger.info(f"Found couriers: {', '.join(unique_couriers)}")
             elif filename.endswith('.csv'):
                 logger.info("Processing CSV file...")
                 df = pd.read_csv(file)
@@ -119,7 +124,7 @@ def upload():
                         df[col] = 'Unknown'
                 logger.info(f"Loaded {len(df)} orders from CSV")
             else:
-                error_msg = "Unsupported file format. Please upload a PDF or CSV file."
+                error_msg = "Unsupported file format. Please upload a PDF manifest or CSV file."
                 if is_replacement:
                     df = pd.DataFrame()  # Empty dataframe for dashboard
                     return render_template('dashboard.html', 
@@ -222,80 +227,90 @@ def extract_text_from_pdf(file):
         raise Exception(f"Could not read PDF file: {str(e)}")
 
 def parse_pdf_to_dataframe(text):
-    """Parse PDF text to DataFrame with improved pattern matching"""
-    rows = []
-    lines = text.splitlines()
+    """Parse PDF text to DataFrame with improved manifest parsing"""
+    lines = text.split('\n')
+    entries = []
+    courier = None
+
+    logger.info(f"Processing {len(lines)} lines from PDF manifest")
     
-    # Improved patterns for different courier services
-    awb_patterns = {
-        'Valmo': r'VL\d+',
-        'Xpress Bees': r'134\d+',
-        'Delhivery': r'1490\d+',
-        'Generic': r'[A-Z]{2,3}\d{8,}'
-    }
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # Detect courier
+        if line.startswith("Courier :"):
+            courier = line.replace("Courier :", "").strip()
+            logger.info(f"Found courier: {courier}")
+
+        # Match Order ID (11 digits)
+        match_order = re.match(r'^\d{11}$', line)
+        if match_order:
+            order_id = line
+            
+            try:
+                # Check if we have enough lines ahead
+                if i + 5 >= len(lines):
+                    logger.warning(f"Not enough lines after order ID {order_id}")
+                    i += 1
+                    continue
+                
+                # Get AWB ID (2 lines after order ID)
+                awb_candidate = lines[i + 2].strip() if i + 2 < len(lines) else ""
+                
+                # Get SKU (3 lines after order ID)
+                sku_candidate = lines[i + 3].strip() if i + 3 < len(lines) else ""
+
+                # Handle multi-line SKUs
+                if ("Combo" in sku_candidate or "pcs" in sku_candidate) and i + 4 < len(lines):
+                    sku = sku_candidate + " " + lines[i + 4].strip()
+                    qty_line = lines[i + 5].strip() if i + 5 < len(lines) else "1"
+                    skip_lines = 6
+                else:
+                    sku = sku_candidate
+                    qty_line = lines[i + 4].strip() if i + 4 < len(lines) else "1"
+                    skip_lines = 5
+
+                # Clean AWB ID and SKU
+                awb_id = awb_candidate.strip()
+                sku_clean = sku.strip()
+
+                # Validate AWB ID (should not be empty or just numbers like order ID)
+                if awb_id and awb_id != order_id and not re.match(r'^\d{11}$', awb_id):
+                    # Append cleaned row
+                    entries.append({
+                        "Order ID": order_id,
+                        "AWB ID": awb_id,
+                        "Courier": courier if courier else "Unknown",
+                        "SKU": sku_clean if sku_clean else "Unknown",
+                        "Qty": 1
+                    })
+                    
+                    logger.debug(f"Extracted: Order {order_id}, AWB {awb_id}, SKU {sku_clean}")
+                else:
+                    logger.warning(f"Invalid AWB ID '{awb_id}' for order {order_id}")
+
+                # Skip processed lines
+                i += skip_lines
+                
+            except IndexError as e:
+                logger.warning(f"Index error processing order {order_id}: {str(e)}")
+                i += 1
+            except Exception as e:
+                logger.warning(f"Error processing order {order_id}: {str(e)}")
+                i += 1
+        else:
+            i += 1
+
+    # Create DataFrame
+    df = pd.DataFrame(entries)
+    logger.info(f"Successfully parsed {len(df)} orders from PDF manifest")
     
-    order_patterns = [
-        r'16\d{10,}',  # 16 followed by digits
-        r'17\d{10,}',  # 17 followed by digits
-        r'\d{12,15}'   # 12-15 digit numbers
-    ]
-    
-    sku_keywords = {
-        'Together': ['Together'],
-        'Divine Aura': ['Divine Aura', 'Aura'],
-        'Mystic Aura': ['Mystic Aura'],
-        'Vibrant': ['Vibrant']
-    }
-    
-    logger.info(f"Processing {len(lines)} lines from PDF")
-    
-    for line_num, line in enumerate(lines):
-        line = line.strip()
-        if not line:
-            continue
-            
-        try:
-            # Find AWB ID
-            awb = None
-            courier = "Unknown"
-            
-            for courier_name, pattern in awb_patterns.items():
-                matches = re.findall(pattern, line, re.IGNORECASE)
-                if matches:
-                    awb = matches[0]
-                    courier = courier_name
-                    break
-            
-            if not awb:
-                continue
-            
-            # Find Order ID
-            order = None
-            for pattern in order_patterns:
-                matches = re.findall(pattern, line)
-                if matches:
-                    order = matches[0]
-                    break
-            
-            if not order:
-                order = "Unknown"
-            
-            # Determine SKU
-            sku = "Unknown"
-            for sku_name, keywords in sku_keywords.items():
-                if any(keyword.lower() in line.lower() for keyword in keywords):
-                    sku = sku_name
-                    break
-            
-            rows.append([order, awb, courier, sku, 1])
-            logger.debug(f"Line {line_num + 1}: Found order {order}, AWB {awb}, courier {courier}, SKU {sku}")
-            
-        except Exception as e:
-            logger.warning(f"Error processing line {line_num + 1}: {str(e)}")
-            continue
-    
-    df = pd.DataFrame(rows, columns=['Order ID', 'AWB ID', 'Courier', 'SKU', 'Qty'])
-    logger.info(f"Successfully parsed {len(df)} orders from PDF")
+    # Log some statistics
+    if not df.empty:
+        unique_couriers = df['Courier'].unique()
+        logger.info(f"Found couriers: {', '.join(unique_couriers)}")
+        logger.info(f"Orders per courier: {df['Courier'].value_counts().to_dict()}")
     
     return df
 
