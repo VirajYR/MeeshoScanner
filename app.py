@@ -40,7 +40,7 @@ if not app.debug:
     app.logger.info('Meesho Order Scanner startup')
 
 # Original logging setup for compatibility
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 UPLOAD_FOLDER = 'uploads'
@@ -53,42 +53,40 @@ DATA_FILE = os.path.join(UPLOAD_FOLDER, 'orders.csv')
 def index():
     if not os.path.exists(DATA_FILE):
         return render_template('index.html', message="Please upload your manifest PDF file.")
-    df = pd.read_csv(DATA_FILE)
-    packed = df[df['Status'] == 'Packed']
-    pending = df[df['Status'] == 'Pending']
-    cancelled = df[df['Status'] == 'Cancelled']
-    return render_template('dashboard.html', packed=len(packed), pending=len(pending), cancelled=len(cancelled), table=df.to_dict(orient='records'))
+    try:
+        df = pd.read_csv(DATA_FILE)
+        packed = df[df['Status'] == 'Packed']
+        pending = df[df['Status'] == 'Pending']
+        cancelled = df[df['Status'] == 'Cancelled']
+        return render_template('dashboard.html', packed=len(packed), pending=len(pending), cancelled=len(cancelled), table=df.to_dict(orient='records'))
+    except pd.errors.EmptyDataError:
+        return render_template('index.html', message="The orders file is empty. Please upload a new one.")
+    except Exception as e:
+        app.logger.error(f"Error loading data file: {e}")
+        return render_template('index.html', message=f"Error loading data: {e}")
 
 @app.route('/upload', methods=['POST'])
 def upload():
     try:
-        if 'file' not in request.files:
-            # Check if this is a dashboard upload
-            if os.path.exists(DATA_FILE):
-                df = pd.read_csv(DATA_FILE)
-                return render_template('dashboard.html', 
-                                       packed=len(df[df['Status'] == 'Packed']),
-                                       pending=len(df[df['Status'] == 'Pending']),
-                                       cancelled=len(df[df['Status'] == 'Cancelled']),
-                                       table=df.to_dict(orient='records'),
-                                       message="No file selected. Please choose a file to upload.")
-            else:
-                return render_template('index.html', message="No file selected. Please choose a file to upload.")
-        
-        file = request.files['file']
-        if file.filename == '':
-            # Check if this is a dashboard upload
-            if os.path.exists(DATA_FILE):
-                df = pd.read_csv(DATA_FILE)
-                return render_template('dashboard.html', 
-                                       packed=len(df[df['Status'] == 'Packed']),
-                                       pending=len(df[df['Status'] == 'Pending']),
-                                       cancelled=len(df[df['Status'] == 'Cancelled']),
-                                       table=df.to_dict(orient='records'),
-                                       message="No file selected. Please choose a file to upload.")
-            else:
-                return render_template('index.html', message="No file selected. Please choose a file to upload.")
+        # Determine if we are on the dashboard (to return to the correct page on error)
+        is_dashboard_context = 'file' not in request.files or request.files['file'].filename == ''
 
+        if 'file' not in request.files or request.files['file'].filename == '':
+            error_msg = "No file selected. Please choose a file to upload."
+            if os.path.exists(DATA_FILE):
+                try:
+                    df = pd.read_csv(DATA_FILE)
+                    return render_template('dashboard.html',
+                                           packed=len(df[df['Status'] == 'Packed']),
+                                           pending=len(df[df['Status'] == 'Pending']),
+                                           cancelled=len(df[df['Status'] == 'Cancelled']),
+                                           table=df.to_dict(orient='records'),
+                                           message=error_msg)
+                except:
+                    pass
+            return render_template('index.html', message=error_msg)
+
+        file = request.files['file']
         filename = file.filename.lower()
         logger.info(f"Processing file: {filename}")
         
@@ -103,6 +101,7 @@ def upload():
             except Exception as e:
                 logger.error(f"Error removing previous data file: {str(e)}")
 
+        df = pd.DataFrame()
         try:
             if filename.endswith('.pdf'):
                 logger.info("Processing PDF manifest file...")
@@ -110,10 +109,6 @@ def upload():
                 df = parse_pdf_to_dataframe(pdf_text)
                 logger.info(f"Extracted {len(df)} orders from PDF manifest")
                 
-                # Log extraction summary
-                if not df.empty:
-                    unique_couriers = df['Courier'].unique()
-                    logger.info(f"Found couriers: {', '.join(unique_couriers)}")
             elif filename.endswith('.csv'):
                 logger.info("Processing CSV file...")
                 df = pd.read_csv(file)
@@ -125,46 +120,30 @@ def upload():
                 logger.info(f"Loaded {len(df)} orders from CSV")
             else:
                 error_msg = "Unsupported file format. Please upload a PDF manifest or CSV file."
-                if is_replacement:
-                    df = pd.DataFrame()  # Empty dataframe for dashboard
-                    return render_template('dashboard.html', 
-                                           packed=0, pending=0, cancelled=0,
-                                           table=[], message=error_msg)
-                else:
-                    return render_template('index.html', message=error_msg)
-
+                return render_template('dashboard.html' if is_replacement else 'index.html', message=error_msg)
+        
             if df.empty:
                 error_msg = "No valid data found in the uploaded file. Please check the file format and content."
-                if is_replacement:
-                    return render_template('dashboard.html', 
-                                           packed=0, pending=0, cancelled=0,
-                                           table=[], message=error_msg)
-                else:
-                    return render_template('index.html', message=error_msg)
+                return render_template('dashboard.html' if is_replacement else 'index.html', message=error_msg)
 
-            # Initialize status columns
-            df['Status'] = 'Pending'
-            df['Scanned Time'] = ''
-            
-            # Ensure correct data types
+            # Initialize status columns if they don't exist
+            if 'Status' not in df.columns:
+                df['Status'] = 'Pending'
+            if 'Scanned Time' not in df.columns:
+                df['Scanned Time'] = ''
+
+            # Ensure correct data types and clean
             df['Status'] = df['Status'].astype(str)
             df['Scanned Time'] = df['Scanned Time'].astype(str)
-            df['AWB ID'] = df['AWB ID'].astype(str)
-            df['Order ID'] = df['Order ID'].astype(str)
+            df['AWB ID'] = df['AWB ID'].astype(str).str.strip()
+            df['Order ID'] = df['Order ID'].astype(str).str.strip()
             
-            # Clean and validate data
-            df = df.dropna(subset=['AWB ID'])  # Remove rows without AWB ID
-            df['AWB ID'] = df['AWB ID'].astype(str).str.strip()  # Clean AWB IDs
-            df = df[df['AWB ID'] != '']  # Remove empty AWB IDs
+            df = df.dropna(subset=['AWB ID'])
+            df = df[df['AWB ID'] != '']
             
             if df.empty:
                 error_msg = "No valid AWB IDs found in the uploaded file."
-                if is_replacement:
-                    return render_template('dashboard.html', 
-                                           packed=0, pending=0, cancelled=0,
-                                           table=[], message=error_msg)
-                else:
-                    return render_template('index.html', message=error_msg)
+                return render_template('dashboard.html' if is_replacement else 'index.html', message=error_msg)
             
             df.to_csv(DATA_FILE, index=False)
             logger.info(f"Successfully saved {len(df)} orders to {DATA_FILE}")
@@ -176,21 +155,34 @@ def upload():
         except Exception as e:
             logger.error(f"Error processing file: {str(e)}")
             error_msg = f"Error processing file: {str(e)}. Please ensure the file is not corrupted and contains valid data."
-            if is_replacement:
-                return render_template('dashboard.html', 
-                                       packed=0, pending=0, cancelled=0,
-                                       table=[], message=error_msg)
+            # Try to load existing data for dashboard, else use defaults
+            if os.path.exists(DATA_FILE):
+                try:
+                    df = pd.read_csv(DATA_FILE)
+                    packed = len(df[df['Status'] == 'Packed']) if 'Status' in df.columns else 0
+                    pending = len(df[df['Status'] == 'Pending']) if 'Status' in df.columns else 0
+                    cancelled = len(df[df['Status'] == 'Cancelled']) if 'Status' in df.columns else 0
+                    table = df.to_dict(orient='records')
+                except Exception:
+                    packed = pending = cancelled = 0
+                    table = []
             else:
-                return render_template('index.html', message=error_msg)
+                packed = pending = cancelled = 0
+                table = []
+            return render_template('dashboard.html',
+                                   packed=packed,
+                                   pending=pending,
+                                   cancelled=cancelled,
+                                   table=table,
+                                   message=error_msg)
 
     except Exception as e:
         logger.error(f"Upload failed: {str(e)}")
         error_msg = f"Upload failed: {str(e)}"
-        # Try to determine if we should show dashboard or index
         if os.path.exists(DATA_FILE):
             try:
                 df = pd.read_csv(DATA_FILE)
-                return render_template('dashboard.html', 
+                return render_template('dashboard.html',
                                        packed=len(df[df['Status'] == 'Packed']),
                                        pending=len(df[df['Status'] == 'Pending']),
                                        cancelled=len(df[df['Status'] == 'Cancelled']),
@@ -212,8 +204,7 @@ def extract_text_from_pdf(file):
         
         for page_num, page in enumerate(doc):
             try:
-                page_text = page.get_text()
-                text += page_text + "\n"
+                text += page.get_text() + "\n"
                 logger.info(f"Extracted text from page {page_num + 1}")
             except Exception as e:
                 logger.warning(f"Error extracting text from page {page_num + 1}: {str(e)}")
@@ -227,91 +218,75 @@ def extract_text_from_pdf(file):
         raise Exception(f"Could not read PDF file: {str(e)}")
 
 def parse_pdf_to_dataframe(text):
-    """Parse PDF text to DataFrame with improved manifest parsing"""
-    lines = text.split('\n')
+    """Parse PDF text to DataFrame with robust manifest parsing"""
+    required_columns = ["Order ID", "AWB ID", "Courier", "SKU", "Qty"]
     entries = []
-    courier = None
-
-    logger.info(f"Processing {len(lines)} lines from PDF manifest")
-    
+    courier = "Unknown"
+    lines = text.split('\n')
     i = 0
     while i < len(lines):
         line = lines[i].strip()
-
-        # Detect courier
+        # Step 1: Detect courier
         if line.startswith("Courier :"):
             courier = line.replace("Courier :", "").strip()
             logger.info(f"Found courier: {courier}")
-
-        # Match Order ID (11 digits)
-        match_order = re.match(r'^\d{11}$', line)
-        if match_order:
-            order_id = line
-            
-            try:
-                # Check if we have enough lines ahead
-                if i + 5 >= len(lines):
-                    logger.warning(f"Not enough lines after order ID {order_id}")
-                    i += 1
-                    continue
-                
-                # Get AWB ID (2 lines after order ID)
-                awb_candidate = lines[i + 2].strip() if i + 2 < len(lines) else ""
-                
-                # Get SKU (3 lines after order ID)
-                sku_candidate = lines[i + 3].strip() if i + 3 < len(lines) else ""
-
-                # Handle multi-line SKUs
-                if ("Combo" in sku_candidate or "pcs" in sku_candidate) and i + 4 < len(lines):
-                    sku = sku_candidate + " " + lines[i + 4].strip()
-                    qty_line = lines[i + 5].strip() if i + 5 < len(lines) else "1"
-                    skip_lines = 6
-                else:
-                    sku = sku_candidate
-                    qty_line = lines[i + 4].strip() if i + 4 < len(lines) else "1"
-                    skip_lines = 5
-
-                # Clean AWB ID and SKU
-                awb_id = awb_candidate.strip()
-                sku_clean = sku.strip()
-
-                # Validate AWB ID (should not be empty or just numbers like order ID)
-                if awb_id and awb_id != order_id and not re.match(r'^\d{11}$', awb_id):
-                    # Append cleaned row
-                    entries.append({
-                        "Order ID": order_id,
-                        "AWB ID": awb_id,
-                        "Courier": courier if courier else "Unknown",
-                        "SKU": sku_clean if sku_clean else "Unknown",
-                        "Qty": 1
-                    })
-                    
-                    logger.debug(f"Extracted: Order {order_id}, AWB {awb_id}, SKU {sku_clean}")
-                else:
-                    logger.warning(f"Invalid AWB ID '{awb_id}' for order {order_id}")
-
-                # Skip processed lines
-                i += skip_lines
-                
-            except IndexError as e:
-                logger.warning(f"Index error processing order {order_id}: {str(e)}")
+        
+        # Step 2: Look for a new order by finding a line with digits and checking the next line for the '_1' pattern
+        if re.match(r'^\d+$', line):
+            if i + 1 < len(lines) and re.match(r'^\d+_\d+$', lines[i+1].strip()):
+                order_id = line + lines[i+1].strip()
+                j = i + 2  # Start looking for AWB from here
+            else:
                 i += 1
-            except Exception as e:
-                logger.warning(f"Error processing order {order_id}: {str(e)}")
-                i += 1
+                continue
         else:
             i += 1
+            continue
+        
+        awb_id = 'Unknown'
+        sku = 'Unknown'
+        qty = 1
+        
+        try:
+            # Assuming AWB ID is on the next line
+            if j < len(lines) and lines[j].strip():
+                awb_id = lines[j].strip()
+            
+            # Assuming SKU is the line after AWB ID
+            if j + 1 < len(lines) and lines[j+1].strip():
+                sku = lines[j+1].strip()
+                
+            # Assuming Quantity is the line after SKU
+            if j + 2 < len(lines) and re.match(r'^\d+$', lines[j+2].strip()):
+                qty = int(lines[j+2].strip())
+                
+            # Validate AWB ID format
+            is_valid_awb = (awb_id and awb_id != order_id and
+                            (re.match(r'^[A-Z]{2}\d+', awb_id) or
+                             re.match(r'^M\d+', awb_id) or
+                             re.match(r'^1490\d{12,}', awb_id) or
+                             re.match(r'^134\d{11,}', awb_id) or
+                             re.match(r'^VL\d+', awb_id) or
+                             re.match(r'^SF\d+', awb_id)))
+            
+            if is_valid_awb:
+                entries.append({
+                    "Order ID": order_id,
+                    "AWB ID": awb_id,
+                    "Courier": courier,
+                    "SKU": sku,
+                    "Qty": qty
+                })
+                logger.debug(f"Extracted: Order ID {order_id}, AWB {awb_id}, SKU {sku}, Qty {qty}")
+            else:
+                logger.warning(f"Invalid AWB ID '{awb_id}' for order {order_id}")
+        except Exception as e:
+            logger.warning(f"Error parsing order {order_id}: {e}")
+        
+        i = j + 2  # Move past the processed block
 
-    # Create DataFrame
-    df = pd.DataFrame(entries)
+    df = pd.DataFrame(entries, columns=required_columns)
     logger.info(f"Successfully parsed {len(df)} orders from PDF manifest")
-    
-    # Log some statistics
-    if not df.empty:
-        unique_couriers = df['Courier'].unique()
-        logger.info(f"Found couriers: {', '.join(unique_couriers)}")
-        logger.info(f"Orders per courier: {df['Courier'].value_counts().to_dict()}")
-    
     return df
 
 @app.route('/scan', methods=['POST'])
@@ -332,7 +307,6 @@ def scan():
 
         df = pd.read_csv(DATA_FILE)
         
-        # Clean AWB ID for comparison
         awb_id_clean = str(awb_id).strip()
         df['AWB ID'] = df['AWB ID'].astype(str).str.strip()
         
@@ -347,14 +321,12 @@ def scan():
             elif current_status == 'Cancelled':
                 return jsonify({'success': False, 'message': 'This item was previously cancelled.', 'status': 'Cancelled'})
             else:
-                # Mark as packed
                 df.loc[match, 'Status'] = 'Packed'
                 current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 df.loc[match, 'Scanned Time'] = current_time
                 df.to_csv(DATA_FILE, index=False)
                 logger.info(f"AWB {awb_id} marked as Packed")
                 
-                # Return updated stats for dashboard
                 packed = len(df[df['Status'] == 'Packed'])
                 pending = len(df[df['Status'] == 'Pending'])
                 cancelled = len(df[df['Status'] == 'Cancelled'])
@@ -371,23 +343,25 @@ def scan():
                     }
                 })
         else:
-            # AWB not found in manifest - add as cancelled
             logger.info(f"AWB {awb_id} not found in manifest, adding as cancelled")
             current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            new_row = pd.DataFrame([[
-                "Unknown", 
-                awb_id_clean, 
-                "Unknown", 
-                "Unknown", 
-                1, 
-                "Cancelled", 
-                current_time
-            ]], columns=['Order ID', 'AWB ID', 'Courier', 'SKU', 'Qty', 'Status', 'Scanned Time'])
+            
+            # Define columns explicitly to handle potential new DataFrame
+            columns = ['Order ID', 'AWB ID', 'Courier', 'SKU', 'Qty', 'Status', 'Scanned Time']
+            new_row_data = {
+                'Order ID': ["Unknown"],
+                'AWB ID': [awb_id_clean],
+                'Courier': ["Unknown"],
+                'SKU': ["Unknown"],
+                'Qty': [1],
+                'Status': ["Cancelled"],
+                'Scanned Time': [current_time]
+            }
+            new_row = pd.DataFrame(new_row_data, columns=columns)
             
             df = pd.concat([df, new_row], ignore_index=True)
             df.to_csv(DATA_FILE, index=False)
             
-            # Return updated stats for dashboard
             packed = len(df[df['Status'] == 'Packed'])
             pending = len(df[df['Status'] == 'Pending'])
             cancelled = len(df[df['Status'] == 'Cancelled'])
@@ -428,7 +402,6 @@ def delete_entry():
         df = pd.read_csv(DATA_FILE)
         initial_count = len(df)
         
-        # Clean AWB ID for comparison
         awb_id_clean = str(awb_id).strip()
         df['AWB ID'] = df['AWB ID'].astype(str).str.strip()
         
@@ -493,4 +466,6 @@ def health_check():
     })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
